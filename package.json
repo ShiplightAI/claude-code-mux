@@ -1,6 +1,6 @@
 {
   "name": "claude-code-mux",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One messaging client, many Claude Code agents — a multiplexer for routing messages to multiple Claude Code sessions",
   "type": "module",
   "bin": {
@@ -8,8 +8,7 @@
     "claude-mux-bridge": "./dist/bridge.js"
   },
   "files": [
-    "dist",
-    "demo.png"
+    "dist"
   ],
   "scripts": {
     "build": "tsc",
