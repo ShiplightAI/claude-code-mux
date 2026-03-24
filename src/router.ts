@@ -3,19 +3,14 @@
  * claude-mux router entrypoint
  *
  * Loads config from .env, creates a Telegram client and core router,
- * and starts everything. Swap TelegramClient for another MessagingClient
- * implementation to support Discord, Slack, WhatsApp, etc.
- *
- * LLM provider is configured via ROUTER_MODEL env var:
- *   anthropic:claude-haiku-4-5-20251001  (default if ANTHROPIC_API_KEY is set)
- *   openai:gpt-5.4-nano
- *   google:gemini-3.1-flash-lite-preview
+ * and starts everything. Each agent gets its own Telegram forum topic.
  */
 
 import { config } from 'dotenv'
+import { resolve } from 'path'
+import { appendFileSync, existsSync } from 'fs'
 config()
 
-import type { LanguageModel } from 'ai'
 import { Router } from './core-router.js'
 import { TelegramClient } from './clients/telegram.js'
 
@@ -25,60 +20,47 @@ if (!botToken) {
   process.exit(1)
 }
 
-// ---------- LLM model ----------
-
-async function createModel(): Promise<LanguageModel | undefined> {
-  const modelSpec = process.env.ROUTER_MODEL
-
-  if (modelSpec) {
-    const [provider, ...rest] = modelSpec.split(':')
-    const modelId = rest.join(':')
-    if (!modelId) {
-      console.error(`Invalid ROUTER_MODEL format: "${modelSpec}". Expected "provider:model-id".`)
-      process.exit(1)
-    }
-
-    switch (provider) {
-      case 'anthropic': {
-        const { createAnthropic } = await import('@ai-sdk/anthropic')
-        return createAnthropic()(modelId)
-      }
-      case 'openai': {
-        const { createOpenAI } = await import('@ai-sdk/openai')
-        return createOpenAI()(modelId)
-      }
-      case 'google': {
-        const { createGoogleGenerativeAI } = await import('@ai-sdk/google')
-        return createGoogleGenerativeAI()(modelId)
-      }
-      default:
-        console.error(`Unknown LLM provider: "${provider}". Supported: anthropic, openai, google.`)
-        process.exit(1)
-    }
-  }
-
-  // default: use Anthropic Haiku if API key is available
-  if (process.env.ANTHROPIC_API_KEY) {
-    const { createAnthropic } = await import('@ai-sdk/anthropic')
-    return createAnthropic()('claude-haiku-4-5-20251001')
-  }
-
-  return undefined
-}
-
 // ---------- start ----------
 
 const allowedUserIds = process.env.ALLOWED_USER_IDS
   ?.split(',')
   .map(id => parseInt(id.trim(), 10))
 
-const client = new TelegramClient({ botToken, allowedUserIds })
+let forumChatId = process.env.TELEGRAM_CHAT_ID
+
+const client = new TelegramClient({
+  botToken,
+  allowedUserIds,
+  forumChatId: forumChatId ? parseInt(forumChatId, 10) : undefined,
+})
+
+// auto-detect forum chat ID if not provided
+if (!forumChatId) {
+  console.log('[router] TELEGRAM_CHAT_ID not set — auto-detecting from recent messages...')
+  console.log('[router] Send any message in your forum group if not detected.')
+  forumChatId = await client.detectForumChatId() ?? undefined
+  if (!forumChatId) {
+    console.error('Could not auto-detect forum group chat ID. Either:')
+    console.error('  1. Send a message in the forum group, then restart the router')
+    console.error('  2. Set TELEGRAM_CHAT_ID in .env')
+    process.exit(1)
+  }
+  console.log(`[router] Auto-detected forum chat ID: ${forumChatId}`)
+
+  // save to .env so future restarts skip auto-detection
+  const envPath = resolve(process.cwd(), '.env')
+  if (existsSync(envPath)) {
+    appendFileSync(envPath, `\nTELEGRAM_CHAT_ID=${forumChatId}\n`)
+    console.log(`[router] Saved TELEGRAM_CHAT_ID to .env`)
+  }
+}
 
 const router = new Router({
   client,
-  model: await createModel(),
   port: parseInt(process.env.ROUTER_PORT ?? '9900', 10),
   host: process.env.ROUTER_HOST ?? '127.0.0.1',
+  forumChatId,
+  topicsFile: resolve(process.cwd(), '.claude-mux-topics.json'),
 })
 
 router.start()

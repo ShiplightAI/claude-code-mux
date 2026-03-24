@@ -2,38 +2,7 @@
 
 Talk to all your Claude Code agents from your phone. From a single mobile messaging app, chat with them in their active session, switch between agents, get notified when tasks finish, and approve permissions on the go. Seamlessly pick up where you left off — start a task on your desktop, continue the conversation from your phone.
 
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/list` | Show all connected agents |
-| `/switch <agent>` | Switch to an agent by repo, branch, directory, or description |
-| `/status` | Show which agent is active |
-| `/help` | Show all commands |
-| *(any message)* | Chat with the active agent, just like in the terminal |
-
-## Usage (from Telegram)
-
-```
-You: /switch nav
-Bot: Switched to myapp/feature-nav
-
-You: switch to the one working on the bug fix
-Bot: Switched to myapp/fix-auth-bug
-
-You: can you add pagination to the /users endpoint?
-Bot: [monots/encore] I'll add pagination to the /users endpoint...
-
-Bot: [myapp/feature-nav] Finished refactoring the nav component.
-     Changed 3 files, all 24 tests passing.
-     Ready for your review.
-
-Bot: [monots/encore] Permission request:
-     Tool: Bash — Run npm test
-     Reply "yes abcde" or "no abcde"
-You: yes abcde
-```
+Each agent gets its own Telegram topic — no switching commands needed. New agents auto-create topics; disconnected agents auto-close theirs (and reopen on reconnect).
 
 ## Install
 
@@ -45,79 +14,49 @@ npm install -g claude-code-mux
 
 - Claude Code v2.1.80+
 - Node.js 20+
-- A messaging platform bot token:
-  - **Telegram** — supported now (see [Create a Telegram Bot](#create-a-telegram-bot) below)
-  - **Discord** — coming soon
-  - **WhatsApp** — coming soon
-  - **Slack** — coming soon
 
-## Create a Telegram Bot
+## Quick Start
 
-1. Message **@BotFather** on Telegram → `/newbot` → pick a name and username
-2. Copy the **bot token** (looks like `123456789:ABCdef...`)
-3. Keep the token secret — never commit it to git
+### 1. Create a Telegram Bot
 
-## Setup Router
+Message **@BotFather** on Telegram → `/newbot` → pick a name and username → copy the **bot token** (looks like `123456789:ABCdef...`).
 
-The router is a standalone process that owns the Telegram bot and runs once on your machine (or a server). All agents connect to it.
+### 2. Create a Telegram group for your agents
 
-### 1. Configure environment
+This is the trickiest part — Telegram buries these settings, but you only do it once.
 
-Create a `.env` file (the router loads it automatically):
+1. Open Telegram → **New Group** → add your bot → name it (e.g. "Claude Agents")
+2. Open group settings → **Edit** → toggle **Topics** on
+3. Group settings → **Administrators** → **Add Admin** → select your bot → enable **Manage Topics**
+4. Open the **#General** topic and send any message (so the bot can auto-detect the group)
+
+### 3. Start the router
+
+Create a `.env` file:
 
 ```env
-# Required — your bot token from BotFather
 TELEGRAM_BOT_TOKEN=123456789:ABCdef...
-
-# Optional — enables LLM-powered natural language switching
-# Pick a provider and set the corresponding API key:
-ROUTER_MODEL=anthropic:claude-haiku-4-5-20251001
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Or use OpenAI:
-# ROUTER_MODEL=openai:gpt-5.4-nano
-# OPENAI_API_KEY=sk-...
-
-# Or Google:
-# ROUTER_MODEL=google:gemini-3.1-flash-lite-preview
-# GOOGLE_GENERATIVE_AI_API_KEY=...
 ```
 
-See [Configuration > Router](#router) for all available options.
-
-### 2. Start the router
+Start the router:
 
 ```bash
 claude-mux-router
 ```
 
-Or without global install:
+Or without global install: `npx claude-mux-router`
 
-```bash
-npx claude-mux-router
-```
+On first run, the router auto-detects your forum group and saves the chat ID to `.env` automatically.
 
-The router loads `.env` automatically and starts listening on `ws://127.0.0.1:9900/ws`.
+### 4. Set up the bridge (once)
 
-### 3. Pair your Telegram account
-
-Send any message to your bot in Telegram. The router auto-pairs with the first sender and remembers the chat ID for all future replies. If you set `ALLOWED_USER_IDS` in `.env`, only those users can interact with the bot.
-
-## Setup Agent
-
-Each Claude Code session needs the bridge MCP plugin to connect to the router. You register it once globally, then every agent picks it up automatically.
-
-### 1. Register the bridge as a global MCP server
-
-Use `claude mcp add` with the `-s user` flag so the bridge is available in **all** Claude Code sessions:
+Register the bridge as a global MCP server so every Claude Code session picks it up:
 
 ```bash
 claude mcp add -s user claude-mux-bridge -- npx claude-mux-bridge
 ```
 
-### 2. Enable autoApprove for bridge tools
-
-Without this, you'd get a permission prompt every time the agent tries to reply or send a notification — which defeats the purpose of async communication. Open `~/.claude.json` and add `autoApprove` to the bridge entry:
+Then add `autoApprove` in `~/.claude.json` so the agent can reply without permission prompts:
 
 ```json
 {
@@ -131,46 +70,26 @@ Without this, you'd get a permission prompt every time the agent tries to reply 
 }
 ```
 
-### 3. Launch Claude Code sessions
+### 5. Launch Claude Code sessions
 
-Just `cd` into any worktree and start Claude Code. The agent name is auto-detected from git (repo/branch), or falls back to the directory name:
+Just `cd` into any worktree and start Claude Code:
 
 ```bash
-# Terminal 1 — auto-detects as "myapp/feature-nav"
 cd ~/projects/myapp-feature-nav
 claude --dangerously-load-development-channels server:claude-mux-bridge
-
-# Terminal 2 — auto-detects as "monots/encore"
-cd ~/worktrees/monots-encore
-claude --dangerously-load-development-channels server:claude-mux-bridge
-
-# Terminal 3 — auto-detects as "myapp/fix-auth-bug"
-cd ~/projects/myapp-fix-auth-bug
-claude --dangerously-load-development-channels server:claude-mux-bridge
 ```
 
-No per-session env vars needed. Each session registers with the router automatically. When you spin up a new worktree, just start Claude Code in it — no extra setup required.
-
-## Dynamic worktrees
-
-The whole point of this tool: you don't create new bots or set env vars when you spin up a new worktree. Just start Claude Code in the directory:
-
-```bash
-cd ~/worktrees/myapp-hotfix-123
-claude --dangerously-load-development-channels server:claude-mux-bridge
-```
-
-The bridge detects `myapp/hotfix-123` from git and registers automatically. When you close the session, it deregisters and your Telegram shows a disconnect notification.
+The agent registers with the router, which creates a Telegram topic for it automatically. Open the topic to chat with that agent. Spin up more sessions — each gets its own topic.
 
 ## Architecture
 
 ```
-Telegram Bot
-    |
+Telegram Forum Group
+    |  (one topic per agent)
     v
 Router (standalone process, localhost:9900)
-  - Handles /list, /switch, /status commands
-  - Routes messages to the active agent
+  - Creates/closes topics as agents connect/disconnect
+  - Routes messages by thread
     |  (WebSocket)
     v
 Bridge (MCP channel plugin, one per Claude Code session)
@@ -182,45 +101,37 @@ Bridge (MCP channel plugin, one per Claude Code session)
 
 ### Router
 
-Set these in `.env` (or as environment variables) where you run `pnpm router`:
+Set in `.env` (or as environment variables):
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | (required) | Bot token from BotFather |
-| `ROUTER_MODEL` | (optional) | LLM for smart switching, format `provider:model-id` (e.g. `anthropic:claude-haiku-4-5-20251001`, `openai:gpt-5.4-nano`, `google:gemini-3.1-flash-lite-preview`) |
-| `ANTHROPIC_API_KEY` | (optional) | API key for Anthropic models. If set without `ROUTER_MODEL`, defaults to `anthropic:claude-haiku-4-5-20251001` |
-| `OPENAI_API_KEY` | (optional) | API key for OpenAI models |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | (optional) | API key for Google models |
+| `TELEGRAM_CHAT_ID` | auto-detect | Forum group chat ID — auto-detected, or set manually |
 | `ROUTER_PORT` | `9900` | Port the router listens on |
-| `ROUTER_HOST` | `127.0.0.1` | Bind address — use `0.0.0.0` to allow remote bridge connections |
+| `ROUTER_HOST` | `127.0.0.1` | Bind address — use `0.0.0.0` for remote bridges |
 | `ALLOWED_USER_IDS` | auto-pair | Comma-separated Telegram user IDs |
 
 ### Bridge
 
-The agent name is detected automatically: git repo + branch (e.g. `myapp/feature-nav`), or the current directory name if not in a git repo. Most bridge env vars are optional — the defaults work when router and bridge run on the same machine.
-
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `AGENT_NAME` | auto-detect | Override the agent name (default: git repo/branch, or directory name) |
-| `ROUTER_PORT` | `9900` | Must match the router's `ROUTER_PORT` |
-| `ROUTER_URL` | `ws://127.0.0.1:{ROUTER_PORT}/ws` | Full WebSocket URL — set this when the router is on a different machine |
+| `AGENT_NAME` | auto-detect | Override agent name (default: git repo/branch) |
+| `ROUTER_PORT` | `9900` | Must match the router's port |
+| `ROUTER_URL` | `ws://127.0.0.1:{ROUTER_PORT}/ws` | Full WebSocket URL for remote routers |
 
 ## Troubleshooting
 
 **"Conflict: terminated by other getUpdates request"**
-Only one process can poll a Telegram bot token at a time. If you installed the official `telegram@claude-plugins-official` plugin, uninstall it first: `/plugin uninstall telegram@claude-plugins-official` inside Claude Code.
+Only one process can poll a Telegram bot token at a time. If you have the official `telegram@claude-plugins-official` plugin, uninstall it: `/plugin uninstall telegram@claude-plugins-official` inside Claude Code.
 
 **"no MCP server configured with that name"**
-The bridge was likely registered to a project scope instead of user scope. Re-register with the `-s user` flag:
-```bash
-claude mcp add -s user claude-mux-bridge -- npx claude-mux-bridge
-```
+Re-register with user scope: `claude mcp add -s user claude-mux-bridge -- npx claude-mux-bridge`
 
 **Bridge tools keep asking for permission**
-Add `autoApprove` to the MCP server config in `~/.claude.json`:
-```json
-"autoApprove": ["reply", "notify"]
-```
+Add `autoApprove` to `~/.claude.json`: `"autoApprove": ["reply", "notify"]`
 
-**Agent name shows as the directory name instead of repo/branch**
-The bridge couldn't detect git info. Make sure you `cd` into a git repo before starting Claude Code. If there's no git remote, it uses the repo root directory + branch. If it's not a git repo at all, it falls back to the current directory name.
+**Agent name shows as directory name instead of repo/branch**
+Make sure you `cd` into a git repo before starting Claude Code.
+
+**Switched to a new Telegram group?**
+Delete `TELEGRAM_CHAT_ID` from `.env` and restart the router — it will auto-detect the new group.
