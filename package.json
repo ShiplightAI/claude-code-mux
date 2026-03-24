@@ -1,6 +1,6 @@
 {
   "name": "claude-code-mux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One messaging client, many Claude Code agents — a multiplexer for routing messages to multiple Claude Code sessions",
   "type": "module",
   "bin": {
@@ -25,6 +25,14 @@
     "multiplexer",
     "agent"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShiplightAI/claude-code-mux.git"
+  },
+  "homepage": "https://github.com/ShiplightAI/claude-code-mux#readme",
+  "bugs": {
+    "url": "https://github.com/ShiplightAI/claude-code-mux/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.63",

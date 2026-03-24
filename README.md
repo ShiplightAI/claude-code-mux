@@ -2,6 +2,8 @@
 
 Talk to all your Claude Code agents from your phone. From a single mobile messaging app, chat with them in their active session, switch between agents, get notified when tasks finish, and approve permissions on the go. Seamlessly pick up where you left off — start a task on your desktop, continue the conversation from your phone.
 
+![Demo](demo.png)
+
 ## Commands
 
 | Command | Description |
