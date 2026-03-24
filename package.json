@@ -1,0 +1,44 @@
+{
+  "name": "claude-code-mux",
+  "version": "0.1.0",
+  "description": "One messaging client, many Claude Code agents — a multiplexer for routing messages to multiple Claude Code sessions",
+  "type": "module",
+  "bin": {
+    "claude-mux-router": "./dist/router.js",
+    "claude-mux-bridge": "./dist/bridge.js"
+  },
+  "files": [
+    "dist",
+    "demo.png"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "tsc",
+    "router": "tsx src/router.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "telegram",
+    "multiplexer",
+    "agent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.63",
+    "@ai-sdk/google": "^3.0.53",
+    "@ai-sdk/openai": "^3.0.48",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ai": "^6.0.137",
+    "dotenv": "^16.4.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
