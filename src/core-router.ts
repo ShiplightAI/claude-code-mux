@@ -41,6 +41,7 @@ export class Router {
 
   private readonly agents = new Map<string, Agent>()
   private readonly wsBySocket = new Map<WebSocket, Agent>()
+  private readonly pendingOps = new Map<string, Promise<void>>()  // agent name → pending thread operation
 
   // per-client thread mappings: clientName → (agentName → threadId)
   private readonly agentThreads = new Map<string, Map<string, string>>()
@@ -239,9 +240,10 @@ export class Router {
         this.wsBySocket.set(ws, agent)
         console.log(`[router] Agent registered: ${name} (total: ${this.agents.size})`)
 
-        // create threads on all clients
-        this.createAgentThreads(name).then(() => {
-          this.broadcastToAgent(name, `Agent connected.`)
+        // create threads on all clients (serialized per agent)
+        this.enqueueOp(name, async () => {
+          await this.createAgentThreads(name)
+          await this.broadcastToAgent(name, `Agent connected.`)
         })
 
         ws.send(JSON.stringify({ type: 'registered', name }))
@@ -257,6 +259,21 @@ export class Router {
     }
   }
 
+  /** Serialize async operations per agent to prevent races. */
+  private enqueueOp(agentName: string, fn: () => Promise<void>): void {
+    const prev = this.pendingOps.get(agentName) ?? Promise.resolve()
+    const next = prev.then(fn).catch(err => {
+      console.error(`[router] Operation failed for ${agentName}:`, err)
+    })
+    this.pendingOps.set(agentName, next)
+    next.then(() => {
+      // clean up if this is still the latest operation
+      if (this.pendingOps.get(agentName) === next) {
+        this.pendingOps.delete(agentName)
+      }
+    })
+  }
+
   /** Send a message to all threads for an agent across all clients. */
   private async broadcastToAgent(agentName: string, text: string): Promise<void> {
     for (const entry of this.clients) {
@@ -268,15 +285,21 @@ export class Router {
     }
   }
 
-  /** Create threads for an agent on all clients. */
+  /** Create threads for an agent on all clients (skip if already exists). */
   private async createAgentThreads(agentName: string): Promise<void> {
     for (const entry of this.clients) {
       if (!('createThread' in entry.client)) continue
-      const threadClient = entry.client as ThreadCapableClient
 
+      // skip if thread already exists for this agent
+      const threads = this.agentThreads.get(entry.name)!
+      if (threads.has(agentName)) {
+        console.log(`[router] Reusing existing ${entry.name} thread for ${agentName}`)
+        continue
+      }
+
+      const threadClient = entry.client as ThreadCapableClient
       const threadId = await threadClient.createThread(entry.chatId, agentName)
       if (threadId) {
-        const threads = this.agentThreads.get(entry.name)!
         threads.set(agentName, threadId)
         this.threadToAgent.set(threadId, agentName)
         console.log(`[router] Created ${entry.name} thread ${threadId} for ${agentName}`)
@@ -291,7 +314,32 @@ export class Router {
       this.agents.delete(agent.name)
       this.wsBySocket.delete(ws)
       console.log(`[router] Agent disconnected: ${agent.name} (total: ${this.agents.size})`)
-      this.broadcastToAgent(agent.name, `Agent disconnected.`)
+
+      // delay thread deletion — if the agent reconnects quickly (MCP restart), skip it
+      const name = agent.name
+      this.enqueueOp(name, async () => {
+        await new Promise(r => setTimeout(r, 3000))
+        // if the agent reconnected during the delay, don't delete
+        if (this.agents.has(name)) return
+        await this.deleteAgentThreads(name)
+      })
     }
+  }
+
+  /** Delete threads for a disconnected agent on all clients. */
+  private async deleteAgentThreads(agentName: string): Promise<void> {
+    for (const entry of this.clients) {
+      if (!('deleteThread' in entry.client)) continue
+      const threads = this.agentThreads.get(entry.name)
+      const threadId = threads?.get(agentName)
+      if (!threadId) continue
+
+      const threadClient = entry.client as ThreadCapableClient
+      await threadClient.deleteThread(entry.chatId, threadId)
+      threads!.delete(agentName)
+      this.threadToAgent.delete(threadId)
+      console.log(`[router] Deleted ${entry.name} thread for ${agentName}`)
+    }
+    this.saveTopics()
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "claude-code-mux",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "One messaging client, many Claude Code agents — a multiplexer for routing messages to multiple Claude Code sessions",
   "type": "module",
   "bin": {
