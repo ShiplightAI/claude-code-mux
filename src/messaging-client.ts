@@ -4,7 +4,7 @@ export interface InboundMessage {
   chatId: string
   senderId: string
   senderName: string
-  /** Forum topic / thread ID (platform-specific). Present when the message is in a thread. */
+  /** Thread / channel ID (platform-specific). Present when the message is in a thread/channel. */
   threadId?: string
 }
 
@@ -22,7 +22,10 @@ export interface MessagingClient {
   /** Register the handler the router will use to receive messages */
   onMessage(callback: OnMessageCallback): void
 
-  /** Start the client (polling, webhook, etc). Called once by the router. */
+  /** Connect and initialize (resolve once ready). Called before start(). */
+  connect?(): Promise<void>
+
+  /** Start the event loop (polling, webhook, etc). May block forever. */
   start(): Promise<void>
 
   /** Optional cleanup */
@@ -30,11 +33,12 @@ export interface MessagingClient {
 }
 
 /**
- * A messaging client that supports forum topics / threads.
- * Used by the router in forum mode to create per-agent topics.
+ * A messaging client that supports per-agent threads/channels.
+ * Used by the router to create a thread/channel for each agent.
  */
-export interface ForumCapableClient extends MessagingClient {
-  createForumTopic(chatId: string, name: string): Promise<number | null>
-  closeForumTopic(chatId: string, threadId: number): Promise<boolean>
-  deleteForumTopic(chatId: string, threadId: number): Promise<boolean>
+export interface ThreadCapableClient extends MessagingClient {
+  /** Create a thread/channel for an agent. Returns the thread ID or null on failure. */
+  createThread(chatId: string, name: string): Promise<string | null>
+  /** Delete a thread/channel. */
+  deleteThread(chatId: string, threadId: string): Promise<boolean>
 }

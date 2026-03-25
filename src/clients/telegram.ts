@@ -5,7 +5,7 @@
  * and message chunking (4096 char limit).
  */
 
-import type { MessagingClient, ForumCapableClient, OnMessageCallback } from '../messaging-client.js'
+import type { MessagingClient, ThreadCapableClient, OnMessageCallback } from '../messaging-client.js'
 
 // ---------- types ----------
 
@@ -24,7 +24,7 @@ interface TgUpdate {
 
 // ---------- client ----------
 
-export class TelegramClient implements MessagingClient, ForumCapableClient {
+export class TelegramClient implements ThreadCapableClient {
   private readonly tgApi: string
   private readonly allowedUserIds: Set<number>
   private pairedChatId: number | null = null
@@ -70,26 +70,18 @@ export class TelegramClient implements MessagingClient, ForumCapableClient {
     }
   }
 
-  async createForumTopic(chatId: string, name: string): Promise<number | null> {
+  async createThread(chatId: string, name: string): Promise<string | null> {
     const result = await this.tgCall('createForumTopic', {
       chat_id: parseInt(chatId, 10),
       name,
     }) as { message_thread_id: number } | undefined
-    return result?.message_thread_id ?? null
+    return result?.message_thread_id != null ? String(result.message_thread_id) : null
   }
 
-  async closeForumTopic(chatId: string, threadId: number): Promise<boolean> {
-    const result = await this.tgCall('closeForumTopic', {
-      chat_id: parseInt(chatId, 10),
-      message_thread_id: threadId,
-    })
-    return result === true
-  }
-
-  async deleteForumTopic(chatId: string, threadId: number): Promise<boolean> {
+  async deleteThread(chatId: string, threadId: string): Promise<boolean> {
     const result = await this.tgCall('deleteForumTopic', {
       chat_id: parseInt(chatId, 10),
-      message_thread_id: threadId,
+      message_thread_id: parseInt(threadId, 10),
     })
     return result === true
   }

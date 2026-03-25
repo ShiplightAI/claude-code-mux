@@ -1,15 +1,14 @@
 /**
  * Core router for claude-mux.
  *
- * Manages agents via WebSocket, creates Telegram forum topics per agent,
- * and routes messages by thread. Platform-agnostic — communicates
- * with users through a MessagingClient interface.
+ * Manages agents via WebSocket, creates per-agent threads/channels
+ * on one or more messaging platforms, and routes messages by thread.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { readFileSync, writeFileSync } from 'fs'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { MessagingClient, ForumCapableClient, InboundMessage } from './messaging-client.js'
+import type { MessagingClient, ThreadCapableClient, InboundMessage } from './messaging-client.js'
 
 // ---------- types ----------
 
@@ -24,45 +23,53 @@ interface BridgeMessage {
   [key: string]: unknown
 }
 
+export interface ClientEntry {
+  /** Unique name for this client (e.g. "telegram", "discord") */
+  name: string
+  client: MessagingClient
+  /** Chat/guild ID — where threads are created */
+  chatId: string
+}
+
 // ---------- router ----------
 
 export class Router {
-  private readonly client: MessagingClient
+  private readonly clients: ClientEntry[]
   private readonly port: number
   private readonly host: string
   private readonly topicsFile: string | null
 
   private readonly agents = new Map<string, Agent>()
   private readonly wsBySocket = new Map<WebSocket, Agent>()
-  private defaultChatId: string | null = null
 
-  // each agent gets its own Telegram topic
-  private readonly agentToThread = new Map<string, number>()   // agent name → thread_id
-  private readonly threadToAgent = new Map<number, string>()   // thread_id → agent name
+  // per-client thread mappings: clientName → (agentName → threadId)
+  private readonly agentThreads = new Map<string, Map<string, string>>()
+  // reverse lookup: threadId → agentName (thread IDs are unique across platforms)
+  private readonly threadToAgent = new Map<string, string>()
 
   constructor(opts: {
-    client: MessagingClient
+    clients: ClientEntry[]
     port?: number
     host?: string
-    forumChatId?: string
     topicsFile?: string
   }) {
-    this.client = opts.client
+    this.clients = opts.clients
     this.port = opts.port ?? 9900
     this.host = opts.host ?? '127.0.0.1'
     this.topicsFile = opts.topicsFile ?? null
 
-    if (opts.forumChatId) {
-      this.defaultChatId = opts.forumChatId
+    // initialize per-client maps
+    for (const entry of this.clients) {
+      this.agentThreads.set(entry.name, new Map())
     }
   }
 
-  // ---------- topic persistence ----------
+  // ---------- thread persistence ----------
 
-  private loadOldTopics(): Record<string, number> {
+  private loadOldTopics(): Record<string, Record<string, string>> {
     if (!this.topicsFile) return {}
     try {
-      return JSON.parse(readFileSync(this.topicsFile, 'utf-8')) as Record<string, number>
+      return JSON.parse(readFileSync(this.topicsFile, 'utf-8')) as Record<string, Record<string, string>>
     } catch {
       return {}
     }
@@ -71,24 +78,36 @@ export class Router {
   private saveTopics(): void {
     if (!this.topicsFile) return
     try {
-      writeFileSync(this.topicsFile, JSON.stringify(Object.fromEntries(this.agentToThread), null, 2) + '\n')
+      const data: Record<string, Record<string, string>> = {}
+      for (const [clientName, threads] of this.agentThreads) {
+        if (threads.size > 0) {
+          data[clientName] = Object.fromEntries(threads)
+        }
+      }
+      writeFileSync(this.topicsFile, JSON.stringify(data, null, 2) + '\n')
     } catch (err) {
       console.error('[router] Failed to save topic mappings:', err)
     }
   }
 
-  /** Delete old topics from Telegram left over from a previous run. */
+  /** Delete old threads/channels left over from a previous run. */
   private async cleanupOldTopics(): Promise<void> {
-    if (!this.defaultChatId || !('deleteForumTopic' in this.client)) return
-    const forumClient = this.client as ForumCapableClient
     const oldTopics = this.loadOldTopics()
-    const entries = Object.entries(oldTopics)
-    if (entries.length === 0) return
 
-    console.log(`[router] Cleaning up ${entries.length} old topic(s) from previous run...`)
-    for (const [name, threadId] of entries) {
-      await forumClient.deleteForumTopic(this.defaultChatId, threadId)
-      console.log(`[router] Deleted topic "${name}" (${threadId})`)
+    for (const entry of this.clients) {
+      if (!('createThread' in entry.client)) continue
+      const threadClient = entry.client as ThreadCapableClient
+      const clientTopics = oldTopics[entry.name]
+      if (!clientTopics) continue
+
+      const entries = Object.entries(clientTopics)
+      if (entries.length === 0) continue
+
+      console.log(`[router] Cleaning up ${entries.length} old ${entry.name} thread(s)...`)
+      for (const [name, threadId] of entries) {
+        await threadClient.deleteThread(entry.chatId, threadId)
+        console.log(`[router] Deleted ${entry.name} thread "${name}" (${threadId})`)
+      }
     }
 
     // clear the file
@@ -96,11 +115,23 @@ export class Router {
   }
 
   async start(): Promise<void> {
-    // clean up topics from previous run before accepting connections
+    const clientNames = this.clients.map(e => e.name).join(', ')
+    console.log(`[router] Connecting clients: ${clientNames}`)
+
+    // connect all clients that support it (so they're ready for cleanup)
+    for (const entry of this.clients) {
+      if (entry.client.connect) {
+        await entry.client.connect()
+      }
+    }
+
+    // clean up threads from previous run (clients are now connected)
     await this.cleanupOldTopics()
 
-    // wire up inbound messages from the client
-    this.client.onMessage(this.handleInboundMessage.bind(this))
+    // wire up inbound messages from all clients
+    for (const entry of this.clients) {
+      entry.client.onMessage(this.handleInboundMessage.bind(this))
+    }
 
     // start HTTP + WebSocket server
     const httpServer = createServer(this.handleHttpRequest.bind(this))
@@ -116,37 +147,36 @@ export class Router {
       console.log(`[router] Listening on ws://${this.host}:${this.port}/ws`)
     })
 
-    // start the messaging client (blocking — e.g. Telegram poll loop)
-    await this.client.start()
+    // start all messaging client event loops in parallel (may block)
+    await Promise.all(this.clients.map(entry =>
+      entry.client.start().catch(err => {
+        console.error(`[router] ${entry.name} client error:`, err)
+      })
+    ))
   }
 
   // ---------- inbound message dispatch ----------
 
   private async handleInboundMessage(msg: InboundMessage): Promise<void> {
-    if (this.defaultChatId === null) {
-      this.defaultChatId = msg.chatId
-    }
+    if (!msg.threadId) return
 
-    if (!msg.threadId) {
-      // message in General topic or outside a thread — ignore
-      return
-    }
-
-    const threadIdNum = parseInt(msg.threadId, 10)
-    const agentName = this.threadToAgent.get(threadIdNum)
-
+    const agentName = this.threadToAgent.get(msg.threadId)
     if (!agentName) {
-      console.log(`[router] Message in unmapped thread ${threadIdNum}, ignoring`)
+      console.log(`[router] Message in unmapped thread ${msg.threadId}, ignoring`)
       return
     }
 
     const agent = this.agents.get(agentName)
     if (!agent) {
-      await this.client.sendMessage(msg.chatId, `Agent "${agentName}" is not connected.`, msg.threadId)
+      // find which client this message came from to reply on the right one
+      const entry = this.findClientForThread(msg.threadId)
+      if (entry) {
+        await entry.client.sendMessage(entry.chatId, `Agent "${agentName}" is not connected.`, msg.threadId)
+      }
       return
     }
 
-    console.log(`[router] Routing to ${agentName} via thread ${threadIdNum}`)
+    console.log(`[router] Routing to ${agentName} via thread ${msg.threadId}`)
     agent.ws.send(JSON.stringify({
       type: 'message',
       text: msg.text,
@@ -156,15 +186,33 @@ export class Router {
     }))
   }
 
+  private findClientForThread(threadId: string): ClientEntry | undefined {
+    for (const entry of this.clients) {
+      const threads = this.agentThreads.get(entry.name)
+      if (threads) {
+        for (const tid of threads.values()) {
+          if (tid === threadId) return entry
+        }
+      }
+    }
+    return undefined
+  }
+
   // ---------- HTTP ----------
 
   private handleHttpRequest(_req: IncomingMessage, res: ServerResponse): void {
     if (_req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
+      const topicMappings: Record<string, Record<string, string>> = {}
+      for (const [clientName, threads] of this.agentThreads) {
+        if (threads.size > 0) {
+          topicMappings[clientName] = Object.fromEntries(threads)
+        }
+      }
       res.end(JSON.stringify({
         agents: [...this.agents.keys()],
-        paired: this.defaultChatId !== null,
-        topicMappings: Object.fromEntries(this.agentToThread),
+        clients: this.clients.map(e => e.name),
+        topicMappings,
       }))
       return
     }
@@ -191,45 +239,50 @@ export class Router {
         this.wsBySocket.set(ws, agent)
         console.log(`[router] Agent registered: ${name} (total: ${this.agents.size})`)
 
-        if (this.defaultChatId) {
-          this.createAgentTopic(name).then(threadId => {
-            if (threadId) {
-              this.client.sendMessage(this.defaultChatId!, `Agent connected.`, String(threadId))
-            }
-          })
-        }
+        // create threads on all clients
+        this.createAgentThreads(name).then(() => {
+          this.broadcastToAgent(name, `Agent connected.`)
+        })
 
         ws.send(JSON.stringify({ type: 'registered', name }))
       }
 
       if (msg.type === 'reply' || msg.type === 'notify') {
-        if (!this.defaultChatId) return
         const agentInfo = this.wsBySocket.get(ws)
         if (!agentInfo) return
-
-        const threadId = this.agentToThread.get(agentInfo.name)
-        if (threadId) {
-          this.client.sendMessage(this.defaultChatId, String(msg.text), String(threadId))
-        }
+        this.broadcastToAgent(agentInfo.name, String(msg.text))
       }
     } catch (err) {
       console.error('[router] Bad message from bridge:', err)
     }
   }
 
-  /** Create a forum topic for an agent. */
-  private async createAgentTopic(agentName: string): Promise<number | null> {
-    if (!this.defaultChatId || !('createForumTopic' in this.client)) return null
-    const forumClient = this.client as ForumCapableClient
-
-    const threadId = await forumClient.createForumTopic(this.defaultChatId, agentName)
-    if (threadId) {
-      this.agentToThread.set(agentName, threadId)
-      this.threadToAgent.set(threadId, agentName)
-      this.saveTopics()
-      console.log(`[router] Created topic ${threadId} for ${agentName}`)
+  /** Send a message to all threads for an agent across all clients. */
+  private async broadcastToAgent(agentName: string, text: string): Promise<void> {
+    for (const entry of this.clients) {
+      const threads = this.agentThreads.get(entry.name)
+      const threadId = threads?.get(agentName)
+      if (threadId) {
+        await entry.client.sendMessage(entry.chatId, text, threadId)
+      }
     }
-    return threadId
+  }
+
+  /** Create threads for an agent on all clients. */
+  private async createAgentThreads(agentName: string): Promise<void> {
+    for (const entry of this.clients) {
+      if (!('createThread' in entry.client)) continue
+      const threadClient = entry.client as ThreadCapableClient
+
+      const threadId = await threadClient.createThread(entry.chatId, agentName)
+      if (threadId) {
+        const threads = this.agentThreads.get(entry.name)!
+        threads.set(agentName, threadId)
+        this.threadToAgent.set(threadId, agentName)
+        console.log(`[router] Created ${entry.name} thread ${threadId} for ${agentName}`)
+      }
+    }
+    this.saveTopics()
   }
 
   private handleWsClose(ws: WebSocket): void {
@@ -238,14 +291,7 @@ export class Router {
       this.agents.delete(agent.name)
       this.wsBySocket.delete(ws)
       console.log(`[router] Agent disconnected: ${agent.name} (total: ${this.agents.size})`)
-
-      // close the forum topic (keep the mapping so it can be reopened on reconnect)
-      const threadId = this.agentToThread.get(agent.name)
-      if (threadId && this.defaultChatId && 'closeForumTopic' in this.client) {
-        const forumClient = this.client as ForumCapableClient
-        forumClient.closeForumTopic(this.defaultChatId, threadId)
-        this.client.sendMessage(this.defaultChatId, `Agent disconnected.`, String(threadId))
-      }
+      this.broadcastToAgent(agent.name, `Agent disconnected.`)
     }
   }
 }
